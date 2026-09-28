@@ -183,14 +183,12 @@ async def send_task(
     )
 
     for user_id in USERS:
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=message,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    )
-
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
 # =========================
 # BUTTON HANDLER
