@@ -60,14 +60,14 @@ def init_db():
 
     try:
         conn.execute(
-            "ALTER TABLE tasks ADD COLUMN completed_by INTEGER"
+            "ALTER TABLE tasks ADD COLUMN completed_by_name TEXT"
         )
     except sqlite3.OperationalError:
         pass
 
     try:
         conn.execute(
-            "ALTER TABLE tasks ADD COLUMN completed_by_name TEXT"
+            "ALTER TABLE tasks ADD COLUMN overdue_notified INTEGER DEFAULT 0"
         )
     except sqlite3.OperationalError:
         pass
@@ -199,6 +199,43 @@ def get_overdue_tasks():
             overdue.append(row)
 
     return overdue
+
+def mark_overdue_notified(task_id):
+    conn = get_db()
+
+    conn.execute("""
+        UPDATE tasks
+        SET overdue_notified = 1
+        WHERE date = ? AND task_id = ?
+    """, (today_key(), task_id))
+
+    conn.commit()
+    conn.close()
+
+
+async def check_overdue_tasks(context):
+    rows = get_overdue_tasks()
+
+    for row in rows:
+        if row["overdue_notified"]:
+            continue
+
+        sent_time = datetime.fromisoformat(
+            row["sent_at"]
+        ).strftime("%H:%M")
+
+        await context.bot.send_message(
+            chat_id=BROTHER_ID,
+            text=(
+                "⚠️ *Просроченная задача*\n\n"
+                f"{row['task_name']}\n\n"
+                f"Запланировано: {sent_time}\n"
+                "Задача ещё не выполнена."
+            ),
+            parse_mode="Markdown",
+        )
+
+        mark_overdue_notified(row["task_id"])
 
 async def today(update, context):
     rows = get_today_tasks()
