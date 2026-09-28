@@ -224,16 +224,17 @@ async def check_overdue_tasks(context):
             row["sent_at"]
         ).strftime("%H:%M")
 
-        await context.bot.send_message(
-            chat_id=BROTHER_ID,
-            text=(
-                "⚠️ *Просроченная задача*\n\n"
-                f"{row['task_name']}\n\n"
-                f"Запланировано: {sent_time}\n"
-                "Задача ещё не выполнена."
-            ),
-            parse_mode="Markdown",
-        )
+        for user_id in [BROTHER_ID, OWNER_ID]:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "⚠️ *Просроченная задача*\n\n"
+                    f"{row['task_name']}\n\n"
+                    f"Запланировано: {sent_time}\n"
+                    "Задача ещё не выполнена."
+                ),
+                parse_mode="Markdown",
+            )
 
         mark_overdue_notified(row["task_id"])
 
