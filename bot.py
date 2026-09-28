@@ -134,6 +134,48 @@ ALL_TASKS = {**TASKS, **TEST_TASKS}
 OVERDUE_AFTER = timedelta(hours=1)
 
 
+# =========================
+# SCHEDULE CONFIG
+# =========================
+
+# ВАЖНО: в python-telegram-bot v20+ дни недели в run_daily:
+# 0 = воскресенье, 1 = понедельник, ..., 6 = суббота
+SUNDAY = 0
+WEDNESDAY = 3
+
+# Единый источник расписания: используется и планировщиком, и /tomorrow
+SCHEDULE = [
+    # (task_id, время, дни недели; None = каждый день)
+    ("feed",      time(7, 0, tzinfo=TZ),   None),                 # 07:00
+    ("air_on",    time(7, 0, tzinfo=TZ),   None),                 # 07:00
+    ("light_on",  time(14, 30, tzinfo=TZ), None),                 # 14:30
+    ("light_off", time(21, 0, tzinfo=TZ),  None),                 # 21:00
+    ("air_off",   time(22, 0, tzinfo=TZ),  None),                 # 22:00
+    ("water",     time(12, 0, tzinfo=TZ),  (SUNDAY,)),            # вс 12:00
+    ("filter",    time(12, 0, tzinfo=TZ),  (WEDNESDAY, SUNDAY)),  # ср + вс 12:00
+]
+
+WEEKDAYS_RU = [
+    "понедельник", "вторник", "среда", "четверг",
+    "пятница", "суббота", "воскресенье",
+]
+
+
+def tasks_for_date(day):
+    """Список (время, task_id) из расписания на указанную дату, по времени."""
+    # Python: понедельник = 0 ... воскресенье = 6
+    # PTB:    воскресенье = 0 ... суббота = 6
+    ptb_weekday = (day.weekday() + 1) % 7
+
+    result = [
+        (run_time, task_id)
+        for task_id, run_time, days in SCHEDULE
+        if days is None or ptb_weekday in days
+    ]
+
+    return sorted(result, key=lambda item: (item[0].hour, item[0].minute))
+
+
 def is_test_task(task_id):
     return task_id in TEST_TASKS
 
@@ -432,6 +474,32 @@ async def history(update, context):
             )
 
         lines.append("")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+    )
+
+
+async def tomorrow(update, context):
+    """Показывает задачи брата на завтра по расписанию."""
+    day = datetime.now(TZ).date() + timedelta(days=1)
+    items = tasks_for_date(day)
+
+    lines = [
+        "🗓 *Задачи на завтра*",
+        f"📅 {day.strftime('%d.%m.%Y')}, {WEEKDAYS_RU[day.weekday()]}",
+        "",
+    ]
+
+    if not items:
+        lines.append("Задач нет.")
+    else:
+        for run_time, task_id in items:
+            lines.append(f"🕐 {run_time.strftime('%H:%M')} — {TASKS[task_id]}")
+
+        lines.append("")
+        lines.append(f"Всего: {len(items)}")
 
     await update.message.reply_text(
         "\n".join(lines),
@@ -765,23 +833,7 @@ async def daily_report(
 def setup_schedule(app):
     job_queue = app.job_queue
 
-    # ВАЖНО: в python-telegram-bot v20+ дни недели в run_daily:
-    # 0 = воскресенье, 1 = понедельник, ..., 6 = суббота
-    SUNDAY = 0
-    WEDNESDAY = 3
-
-    schedule = [
-        # (task_id, время, дни недели)
-        ("feed",      time(7, 0, tzinfo=TZ),   None),  # каждый день 07:00
-        ("air_on",    time(7, 0, tzinfo=TZ),   None),  # каждый день 07:00
-        ("light_on",  time(14, 30, tzinfo=TZ), None),  # каждый день 14:30
-        ("light_off", time(21, 0, tzinfo=TZ),  None),  # каждый день 21:00
-        ("air_off",   time(22, 0, tzinfo=TZ),  None),  # каждый день 22:00
-        ("water",     time(12, 0, tzinfo=TZ),  (SUNDAY,)),             # вс 12:00
-        ("filter",    time(12, 0, tzinfo=TZ),  (WEDNESDAY, SUNDAY)),  # ср + вс 12:00
-    ]
-
-    for task_id, run_time, days in schedule:
+    for task_id, run_time, days in SCHEDULE:
         kwargs = {"days": days} if days else {}
         job_queue.run_daily(
             scheduled_task,
@@ -842,6 +894,10 @@ def main():
 
     app.add_handler(
         CommandHandler("overdue", overdue)
+    )
+
+    app.add_handler(
+        CommandHandler("tomorrow", tomorrow)
     )
 
     app.add_handler(
