@@ -281,6 +281,10 @@ def setup_schedule(app: Application):
 # MAIN
 # =========================
 
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_task(context, "feed")
+
+
 def main():
 
     app = Application.builder().token(
@@ -293,6 +297,10 @@ def main():
 
     app.add_handler(
         CommandHandler("id", get_id)
+    )
+
+    app.add_handler(
+        CommandHandler("test", test)
     )
 
     app.add_handler(
