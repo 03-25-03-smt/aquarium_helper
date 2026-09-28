@@ -462,6 +462,29 @@ async def test(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     await send_task(context, "feed")
+async def overdue_test(update, context):
+    conn = get_db()
+
+    test_time = datetime.now(TZ) - timedelta(hours=2)
+
+    conn.execute("""
+        INSERT OR REPLACE INTO tasks
+        (date, task_id, task_name, sent_at, completed_at, completed_by, completed_by_name, overdue_notified)
+        VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0)
+    """, (
+        today_key(),
+        "overdue_test",
+        "🧪 Тестовая просроченная задача",
+        test_time.isoformat(),
+    ))
+
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        "🧪 Тестовая просроченная задача создана.\n"
+        "Она считается отправленной 2 часа назад."
+    )
 
 
 # =========================
@@ -620,6 +643,10 @@ def main():
 
     app.add_handler(
         CommandHandler("test", test)
+    )
+
+    app.add_handler(CommandHandler("overdue_test", overdue_test))
+
     )
 
     app.add_handler(
