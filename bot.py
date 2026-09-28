@@ -175,7 +175,112 @@ def get_today_tasks():
 
     return rows
 
+async def today(update, context):
+    rows = get_today_tasks()
 
+    lines = [
+        "📋 *Аквариум сегодня*",
+        f"📅 {datetime.now(TZ).strftime('%d.%m.%Y')}",
+        "",
+    ]
+
+    if not rows:
+        lines.append("Сегодня задач ещё не было.")
+    else:
+        completed_count = 0
+
+        for row in rows:
+            if row["completed_at"]:
+                completed_time = datetime.fromisoformat(
+                    row["completed_at"]
+                ).strftime("%H:%M")
+
+                completed_by = row["completed_by_name"] or "Неизвестно"
+
+                lines.append(
+                    f"✅ {row['task_name']}\n"
+                    f"   👤 {completed_by} — 🕐 {completed_time}"
+                )
+
+                completed_count += 1
+            else:
+                lines.append(
+                    f"⏳ {row['task_name']}\n"
+                    f"   Не выполнено"
+                )
+
+            lines.append("")
+
+        lines.append(
+            f"📈 Выполнено: {completed_count}/{len(rows)}"
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+    )
+
+async def history(update, context):
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM tasks
+        WHERE date >= date('now', 'localtime', '-6 days')
+        ORDER BY date DESC, sent_at DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text(
+            "📚 История пока пустая."
+        )
+        return
+
+    lines = [
+        "📚 *История аквариума*",
+        "Последние 7 дней:",
+        "",
+    ]
+
+    current_date = None
+
+    for row in rows:
+        if row["date"] != current_date:
+            current_date = row["date"]
+
+            date_obj = datetime.fromisoformat(row["date"])
+
+            lines.append(
+                f"📅 *{date_obj.strftime('%d.%m.%Y')}*"
+            )
+
+        if row["completed_at"]:
+            completed_time = datetime.fromisoformat(
+                row["completed_at"]
+            ).strftime("%H:%M")
+
+            completed_by = row["completed_by_name"] or "Неизвестно"
+
+            lines.append(
+                f"  ✅ {row['task_name']}\n"
+                f"     👤 {completed_by} — {completed_time}"
+            )
+        else:
+            lines.append(
+                f"  ❌ {row['task_name']}\n"
+                f"     Не выполнено"
+            )
+
+        lines.append("")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+    )
 # =========================
 # SEND TASK
 # =========================
@@ -440,13 +545,16 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler("test", test)
+        CommandHandler("today", today)
     )
 
     app.add_handler(
-        CallbackQueryHandler(button_handler)
+        CommandHandler("history", history)
     )
 
+    app.add_handler(
+        CommandHandler("test", test)
+    )
     setup_schedule(app)
 
     print("🐟 Aquarium Helper started")
