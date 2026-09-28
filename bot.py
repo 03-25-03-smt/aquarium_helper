@@ -37,13 +37,6 @@ TZ = ZoneInfo("Europe/Prague")
 
 DB_FILE = "aquarium.db"
 
-
-def get_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def init_db():
     conn = get_db()
 
@@ -55,9 +48,25 @@ def init_db():
             task_name TEXT NOT NULL,
             sent_at TEXT NOT NULL,
             completed_at TEXT,
+            completed_by INTEGER,
+            completed_by_name TEXT,
             UNIQUE(date, task_id)
         )
     """)
+
+    try:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN completed_by INTEGER"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN completed_by_name TEXT"
+        )
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -111,7 +120,11 @@ def save_task(task_id):
     conn.close()
 
 
-def complete_task(task_id):
+def complete_task(
+    task_id,
+    user_id,
+    user_name,
+):
     now = datetime.now(TZ)
     date = now.date().isoformat()
     timestamp = now.isoformat()
@@ -121,13 +134,17 @@ def complete_task(task_id):
     conn.execute(
         """
         UPDATE tasks
-        SET completed_at = ?
+        SET completed_at = ?,
+            completed_by = ?,
+            completed_by_name = ?
         WHERE date = ?
         AND task_id = ?
         AND completed_at IS NULL
         """,
         (
             timestamp,
+            user_id,
+            user_name,
             date,
             task_id,
         ),
@@ -135,7 +152,6 @@ def complete_task(task_id):
 
     conn.commit()
     conn.close()
-
 
 def get_today_tasks():
     conn = get_db()
@@ -209,14 +225,30 @@ async def button_handler(
 
     task_id = data.split(":", 1)[1]
 
-    complete_task(task_id)
+    user = query.from_user
+
+    user_id = user.id
+
+    if user_id == BROTHER_ID:
+        user_name = "Брат"
+    elif user_id == OWNER_ID:
+        user_name = "Влад"
+    else:
+        user_name = user.first_name or "Неизвестный пользователь"
+
+    complete_task(
+        task_id,
+        user_id,
+        user_name,
+    )
 
     task_name = TASKS[task_id]
 
     await query.edit_message_text(
         "✅ *Выполнено*\n\n"
         f"{task_name}\n\n"
-        f"Время: {datetime.now(TZ).strftime('%H:%M')}",
+        f"👤 Выполнил: {user_name}\n"
+        f"🕐 Время: {datetime.now(TZ).strftime('%H:%M')}",
         parse_mode="Markdown",
     )
 
@@ -284,34 +316,40 @@ async def daily_report(
         completed_count = 0
 
         for row in rows:
+
             if row["completed_at"]:
+
                 completed_time = datetime.fromisoformat(
                     row["completed_at"]
                 ).strftime("%H:%M")
 
+                completed_by = row["completed_by_name"] or "Неизвестно"
+
                 lines.append(
-                    f"✅ {row['task_name']} — {completed_time}"
+                    f"✅ {row['task_name']}\n"
+                    f"   🕐 {completed_time} — 👤 {completed_by}"
                 )
 
                 completed_count += 1
 
             else:
+
                 lines.append(
-                    f"❌ {row['task_name']} — не выполнено"
+                    f"❌ {row['task_name']}\n"
+                    f"   Не выполнено"
                 )
 
-        lines.extend([
-            "",
-            f"📈 Выполнено: {completed_count}/{len(rows)}",
-        ])
+            lines.append("")
+
+        lines.append(
+            f"📈 Выполнено: {completed_count}/{len(rows)}"
+        )
 
     await context.bot.send_message(
         chat_id=OWNER_ID,
         text="\n".join(lines),
         parse_mode="Markdown",
     )
-
-
 # =========================
 # SCHEDULE
 # =========================
