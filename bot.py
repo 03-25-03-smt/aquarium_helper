@@ -359,6 +359,14 @@ async def daily_report(
 # SCHEDULE
 # =========================
 
+async def schedule_test(context):
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text="🧪 ТЕСТ РАСПИСАНИЯ\n\n"
+             "Если ты видишь это сообщение автоматически — "
+             "JobQueue работает!"
+    )
+
 def setup_schedule(app):
     job_queue = app.job_queue
 
@@ -419,7 +427,11 @@ def setup_schedule(app):
         name="daily_report",
     )
 
-
+    job_queue.run_once(
+        schedule_test,
+        60,
+        name="schedule_test",
+    )
 # =========================
 # MAIN
 # =========================
