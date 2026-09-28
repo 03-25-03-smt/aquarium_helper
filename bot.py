@@ -1,4 +1,5 @@
 import os
+import sqlite3
 from datetime import time, datetime
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,38 @@ TZ = ZoneInfo("Europe/Prague")
 
 
 # =========================
+# DATABASE
+# =========================
+
+DB_FILE = "aquarium.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE(date, task_id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+# =========================
 # TASKS
 # =========================
 
@@ -42,32 +75,80 @@ TASKS = {
 
 
 # =========================
-# COMPLETED TASKS
+# DATABASE HELPERS
 # =========================
-
-completed = {}
-
 
 def today_key():
     return datetime.now(TZ).date().isoformat()
 
 
-def mark_completed(task_id):
-    date = today_key()
+def save_task(task_id):
+    now = datetime.now(TZ)
+    date = now.date().isoformat()
+    timestamp = now.isoformat()
 
-    if date not in completed:
-        completed[date] = set()
+    conn = get_db()
 
-    completed[date].add(task_id)
-
-
-def is_completed(task_id):
-    date = today_key()
-
-    return (
-        date in completed
-        and task_id in completed[date]
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO tasks
+        (date, task_id, task_name, sent_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            date,
+            task_id,
+            TASKS[task_id],
+            timestamp,
+        ),
     )
+
+    conn.commit()
+    conn.close()
+
+
+def complete_task(task_id):
+    now = datetime.now(TZ)
+    date = now.date().isoformat()
+    timestamp = now.isoformat()
+
+    conn = get_db()
+
+    conn.execute(
+        """
+        UPDATE tasks
+        SET completed_at = ?
+        WHERE date = ?
+        AND task_id = ?
+        AND completed_at IS NULL
+        """,
+        (
+            timestamp,
+            date,
+            task_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_today_tasks():
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM tasks
+        WHERE date = ?
+        ORDER BY sent_at
+        """,
+        (today_key(),),
+    ).fetchall()
+
+    conn.close()
+
+    return rows
 
 
 # =========================
@@ -76,23 +157,25 @@ def is_completed(task_id):
 
 async def send_task(
     context: ContextTypes.DEFAULT_TYPE,
-    task_id: str
+    task_id: str,
 ):
     task_name = TASKS[task_id]
+
+    save_task(task_id)
 
     keyboard = [
         [
             InlineKeyboardButton(
                 "✅ Выполнено",
-                callback_data=f"done:{task_id}"
+                callback_data=f"done:{task_id}",
             )
         ]
     ]
 
     message = (
-        f"🐠 **Уход за аквариумом**\n\n"
+        "🐠 *Уход за аквариумом*\n\n"
         f"{task_name}\n\n"
-        f"Когда выполнишь — нажми кнопку ниже."
+        "Когда выполнишь — нажми кнопку ниже."
     )
 
     await context.bot.send_message(
@@ -109,7 +192,7 @@ async def send_task(
 
 async def button_handler(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     query = update.callback_query
 
@@ -122,12 +205,12 @@ async def button_handler(
 
     task_id = data.split(":", 1)[1]
 
-    mark_completed(task_id)
+    complete_task(task_id)
 
     task_name = TASKS[task_id]
 
     await query.edit_message_text(
-        f"✅ **Выполнено**\n\n"
+        "✅ *Выполнено*\n\n"
         f"{task_name}\n\n"
         f"Время: {datetime.now(TZ).strftime('%H:%M')}",
         parse_mode="Markdown",
@@ -140,7 +223,7 @@ async def button_handler(
 
 async def start(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     await update.message.reply_text(
         "🐟 Привет!\n\n"
@@ -156,7 +239,7 @@ async def start(
 
 async def get_id(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     await update.message.reply_text(
         f"🆔 Твой Telegram ID:\n\n"
@@ -166,43 +249,57 @@ async def get_id(
 
 
 # =========================
+# TEST
+# =========================
+
+async def test(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await send_task(context, "feed")
+
+
+# =========================
 # DAILY REPORT
 # =========================
 
 async def daily_report(
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-    date = today_key()
-
-    done = completed.get(date, set())
+    rows = get_today_tasks()
 
     lines = [
-        f"📊 **Отчёт по аквариуму**",
+        "📊 *Отчёт по аквариуму*",
         f"📅 {datetime.now(TZ).strftime('%d.%m.%Y')}",
         "",
     ]
 
-    for task_id, task_name in TASKS.items():
+    if not rows:
+        lines.append("Сегодня задач ещё не было.")
+    else:
+        completed_count = 0
 
-        # Tasks that may not happen every day
-        if task_id == "water":
-            weekday = datetime.now(TZ).weekday()
+        for row in rows:
+            if row["completed_at"]:
+                completed_time = datetime.fromisoformat(
+                    row["completed_at"]
+                ).strftime("%H:%M")
 
-            if weekday != 6:
-                continue
+                lines.append(
+                    f"✅ {row['task_name']} — {completed_time}"
+                )
 
-        if task_id == "filter":
-            weekday = datetime.now(TZ).weekday()
+                completed_count += 1
 
-            if weekday not in (2, 6):
-                continue
+            else:
+                lines.append(
+                    f"❌ {row['task_name']} — не выполнено"
+                )
 
-        if task_id in done:
-            lines.append(f"✅ {task_name}")
-        else:
-            lines.append(f"❌ {task_name}")
-
-    lines.append("")
+        lines.extend([
+            "",
+            f"📈 Выполнено: {completed_count}/{len(rows)}",
+        ])
 
     await context.bot.send_message(
         chat_id=OWNER_ID,
@@ -269,7 +366,7 @@ def setup_schedule(app: Application):
         name="filter",
     )
 
-    # Daily report 22:30
+    # 22:30 report
     job_queue.run_daily(
         daily_report,
         time=time(22, 30, tzinfo=TZ),
@@ -281,11 +378,9 @@ def setup_schedule(app: Application):
 # MAIN
 # =========================
 
-async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_task(context, "feed")
-
-
 def main():
+
+    init_db()
 
     app = Application.builder().token(
         os.environ["BOT_TOKEN"]
