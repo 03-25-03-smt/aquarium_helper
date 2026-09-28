@@ -200,7 +200,7 @@ def complete_task(
 
     conn = get_db()
 
-    conn.execute(
+    cursor = conn.execute(
         """
         UPDATE tasks
         SET completed_at = ?,
@@ -219,6 +219,9 @@ def complete_task(
         ),
     )
 
+    # True — задачу отметили именно сейчас (а не повторное нажатие кнопки)
+    just_completed = cursor.rowcount > 0
+
     conn.commit()
 
     row = conn.execute(
@@ -228,7 +231,7 @@ def complete_task(
 
     conn.close()
 
-    return row
+    return row, just_completed
 
 def get_today_tasks():
     """Задачи за сегодня без тестовых."""
@@ -563,7 +566,7 @@ async def button_handler(
     else:
         user_name = user.first_name or "Неизвестный пользователь"
 
-    row = complete_task(
+    row, just_completed = complete_task(
         task_id,
         user_id,
         user_name,
@@ -589,6 +592,24 @@ async def button_handler(
         f"🕐 Время: {completed_time}",
         parse_mode="Markdown",
     )
+
+    # Мгновенное уведомление владельцу: только при первом нажатии
+    # и только если выполнил не сам владелец
+    if just_completed and user_id != OWNER_ID:
+        sent_time = datetime.fromisoformat(row["sent_at"]).strftime("%H:%M")
+        test_mark = "🧪 (тест) " if is_test_task(task_id) else ""
+
+        await safe_send(
+            context,
+            OWNER_ID,
+            text=(
+                f"✅ {test_mark}*{md(row['completed_by_name'])}* выполнил:\n\n"
+                f"{task_name}\n\n"
+                f"📨 Напоминание: {sent_time}\n"
+                f"🕐 Выполнено: {completed_time}"
+            ),
+            parse_mode="Markdown",
+        )
 
 # =========================
 # START
@@ -770,10 +791,12 @@ def setup_schedule(app):
             **kwargs,
         )
 
-    # Каждый день — 22:30
+    # Каждый день — 23:15.
+    # Позже последней задачи (22:00) + час на выполнение + проверка просрочки в 23:00,
+    # чтобы «Выключить воздух» успел попасть в отчёт с правильным статусом
     job_queue.run_daily(
         daily_report,
-        time=time(22, 30, tzinfo=TZ),
+        time=time(23, 15, tzinfo=TZ),
         name="daily_report",
     )
 
