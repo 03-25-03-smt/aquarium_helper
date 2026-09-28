@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import time, datetime
+from datetime import time, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -173,6 +173,32 @@ def get_today_tasks():
     conn.close()
 
     return rows
+
+def get_overdue_tasks():
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM tasks
+        WHERE date = ?
+        AND completed_at IS NULL
+        """,
+        (today_key(),),
+    ).fetchall()
+
+    conn.close()
+
+    now = datetime.now(TZ)
+    overdue = []
+
+    for row in rows:
+        sent_at = datetime.fromisoformat(row["sent_at"])
+
+        if now - sent_at >= timedelta(hours=1):
+            overdue.append(row)
+
+    return overdue
 
 async def today(update, context):
     rows = get_today_tasks()
