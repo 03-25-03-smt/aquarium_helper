@@ -609,7 +609,7 @@ def setup_schedule(app):
 
     job_queue.run_repeating(
         check_overdue_tasks,
-        interval=900,
+        interval=10,
         first=60,
         name="overdue_checker"
     )
