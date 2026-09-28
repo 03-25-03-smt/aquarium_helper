@@ -583,6 +583,13 @@ def setup_schedule(app):
         name="daily_report",
     )
 
+    job_queue.run_repeating(
+        check_overdue_tasks,
+        interval=900,
+        first=60,
+        name="overdue_checker"
+    )
+
 # =========================
 # MAIN
 # =========================
