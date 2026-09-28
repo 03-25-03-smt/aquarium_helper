@@ -1,15 +1,27 @@
 import os
+import logging
 import sqlite3
 from datetime import time, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
     CallbackQueryHandler,
 )
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+# httpx логирует каждый запрос polling — слишком шумно
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 # =========================
@@ -34,7 +46,26 @@ TZ = ZoneInfo("Europe/Prague")
 # DATABASE
 # =========================
 
-DB_FILE = "/app/data/aquarium.db"
+# На Railway к /app/data должен быть подключён Volume,
+# иначе база будет стираться при каждом деплое/перезапуске.
+DB_FILE = os.environ.get("DB_FILE", "/app/data/aquarium.db")
+
+
+def md(text):
+    """Экранирует текст для parse_mode="Markdown" (имена пользователей и т.п.)."""
+    return escape_markdown(str(text), version=1)
+
+
+async def safe_send(context, chat_id, **kwargs):
+    """Отправка сообщения, которая не роняет job, если пользователь
+    не нажал /start или заблокировал бота."""
+    try:
+        await context.bot.send_message(chat_id=chat_id, **kwargs)
+        return True
+    except TelegramError as e:
+        logger.warning("Не удалось отправить сообщение %s: %s", chat_id, e)
+        return False
+
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
@@ -42,6 +73,7 @@ def get_db():
     return conn
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     conn = get_db()
 
     conn.execute("""
@@ -106,6 +138,8 @@ def save_task(task_id):
 
     conn = get_db()
 
+    # Если задачу уже отправляли сегодня (например, повторный /test),
+    # запись не дублируется
     conn.execute(
         """
         INSERT OR IGNORE INTO tasks
@@ -123,14 +157,18 @@ def save_task(task_id):
     conn.commit()
     conn.close()
 
+    return date
+
 
 def complete_task(
     task_id,
     user_id,
     user_name,
+    date,
 ):
+    """Отмечает задачу выполненной. Возвращает строку из БД
+    (или None, если задачи нет)."""
     now = datetime.now(TZ)
-    date = now.date().isoformat()
     timestamp = now.isoformat()
 
     conn = get_db()
@@ -155,7 +193,15 @@ def complete_task(
     )
 
     conn.commit()
+
+    row = conn.execute(
+        "SELECT * FROM tasks WHERE date = ? AND task_id = ?",
+        (date, task_id),
+    ).fetchone()
+
     conn.close()
+
+    return row
 
 def get_today_tasks():
     conn = get_db()
@@ -225,17 +271,19 @@ async def check_overdue_tasks(context):
         ).strftime("%H:%M")
 
         for user_id in [BROTHER_ID, OWNER_ID]:
-            await context.bot.send_message(
-                chat_id=user_id,
+            await safe_send(
+                context,
+                user_id,
                 text=(
                     "⚠️ *Просроченная задача*\n\n"
-                    f"{row['task_name']}\n\n"
+                    f"{md(row['task_name'])}\n\n"
                     f"Запланировано: {sent_time}\n"
                     "Задача ещё не выполнена."
                 ),
                 parse_mode="Markdown",
             )
 
+        # Помечаем даже если отправка не удалась — иначе будет спам каждую минуту
         mark_overdue_notified(row["task_id"])
 
 async def today(update, context):
@@ -258,7 +306,7 @@ async def today(update, context):
                     row["completed_at"]
                 ).strftime("%H:%M")
 
-                completed_by = row["completed_by_name"] or "Неизвестно"
+                completed_by = md(row["completed_by_name"] or "Неизвестно")
 
                 lines.append(
                     f"✅ {row['task_name']}\n"
@@ -286,13 +334,17 @@ async def today(update, context):
 async def history(update, context):
     conn = get_db()
 
+    # Дата считается по времени Праги, а не по времени сервера (на Railway это UTC)
+    week_ago = (datetime.now(TZ).date() - timedelta(days=6)).isoformat()
+
     rows = conn.execute(
         """
         SELECT *
         FROM tasks
-        WHERE date >= date('now', 'localtime', '-6 days')
+        WHERE date >= ?
         ORDER BY date DESC, sent_at DESC
-        """
+        """,
+        (week_ago,),
     ).fetchall()
 
     conn.close()
@@ -326,7 +378,7 @@ async def history(update, context):
                 row["completed_at"]
             ).strftime("%H:%M")
 
-            completed_by = row["completed_by_name"] or "Неизвестно"
+            completed_by = md(row["completed_by_name"] or "Неизвестно")
 
             lines.append(
                 f"  ✅ {row['task_name']}\n"
@@ -354,13 +406,15 @@ async def send_task(
 ):
     task_name = TASKS[task_id]
 
-    save_task(task_id)
+    date = save_task(task_id)
 
+    # Дата в callback_data нужна, чтобы кнопка, нажатая после полуночи,
+    # отметила задачу за правильный день
     keyboard = [
         [
             InlineKeyboardButton(
                 "✅ Выполнено",
-                callback_data=f"done:{task_id}",
+                callback_data=f"done:{date}:{task_id}",
             )
         ]
     ]
@@ -372,12 +426,18 @@ async def send_task(
     )
 
     for user_id in USERS:
-        await context.bot.send_message(
-            chat_id=user_id,
+        await safe_send(
+            context,
+            user_id,
             text=message,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
+
+async def scheduled_task(context: ContextTypes.DEFAULT_TYPE):
+    """Callback для JobQueue: task_id передаётся через job.data."""
+    await send_task(context, context.job.data)
 
 # =========================
 # BUTTON HANDLER
@@ -390,12 +450,21 @@ async def button_handler(
     query = update.callback_query
     await query.answer()
 
-    data = query.data
+    data = query.data or ""
 
     if not data.startswith("done:"):
         return
 
-    task_id = data.split(":", 1)[1]
+    parts = data.split(":")
+
+    if len(parts) == 3:
+        _, date, task_id = parts
+    else:
+        # Старый формат кнопок без даты: done:<task_id>
+        date, task_id = today_key(), parts[1]
+
+    if task_id not in TASKS:
+        return
 
     user = query.from_user
     user_id = user.id
@@ -407,19 +476,30 @@ async def button_handler(
     else:
         user_name = user.first_name or "Неизвестный пользователь"
 
-    complete_task(
+    row = complete_task(
         task_id,
         user_id,
         user_name,
+        date,
     )
 
     task_name = TASKS[task_id]
 
+    if row is None or row["completed_at"] is None:
+        await query.edit_message_text(
+            f"⚠️ Не удалось найти задачу «{task_name}» в базе."
+        )
+        return
+
+    completed_time = datetime.fromisoformat(
+        row["completed_at"]
+    ).strftime("%H:%M")
+
     await query.edit_message_text(
         "✅ *Выполнено*\n\n"
         f"{task_name}\n\n"
-        f"👤 Выполнил: {user_name}\n"
-        f"🕐 Время: {datetime.now(TZ).strftime('%H:%M')}",
+        f"👤 Выполнил: {md(row['completed_by_name'])}\n"
+        f"🕐 Время: {completed_time}",
         parse_mode="Markdown",
     )
 
@@ -462,8 +542,17 @@ async def test(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    # Тестовые команды — только для владельца
+    if update.effective_user.id != OWNER_ID:
+        return
+
     await send_task(context, "feed")
+
+
 async def overdue_test(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+
     conn = get_db()
 
     test_time = datetime.now(TZ) - timedelta(hours=2)
@@ -516,7 +605,7 @@ async def daily_report(
                     row["completed_at"]
                 ).strftime("%H:%M")
 
-                completed_by = row["completed_by_name"] or "Неизвестно"
+                completed_by = md(row["completed_by_name"] or "Неизвестно")
 
                 lines.append(
                     f"✅ {row['task_name']}\n"
@@ -538,8 +627,9 @@ async def daily_report(
             f"📈 Выполнено: {completed_count}/{len(rows)}"
         )
 
-    await context.bot.send_message(
-        chat_id=OWNER_ID,
+    await safe_send(
+        context,
+        OWNER_ID,
         text="\n".join(lines),
         parse_mode="Markdown",
     )
@@ -550,55 +640,31 @@ async def daily_report(
 def setup_schedule(app):
     job_queue = app.job_queue
 
-    # Каждый день — 07:00
-    job_queue.run_daily(
-        lambda context: send_task(context, "feed"),
-        time=time(7, 0, tzinfo=TZ),
-        name="feeding",
-    )
+    # ВАЖНО: в python-telegram-bot v20+ дни недели в run_daily:
+    # 0 = воскресенье, 1 = понедельник, ..., 6 = суббота
+    SUNDAY = 0
+    WEDNESDAY = 3
 
-    job_queue.run_daily(
-        lambda context: send_task(context, "air_on"),
-        time=time(7, 0, tzinfo=TZ),
-        name="air_on",
-    )
+    schedule = [
+        # (task_id, время, дни недели)
+        ("feed",      time(7, 0, tzinfo=TZ),   None),  # каждый день 07:00
+        ("air_on",    time(7, 0, tzinfo=TZ),   None),  # каждый день 07:00
+        ("light_on",  time(14, 30, tzinfo=TZ), None),  # каждый день 14:30
+        ("light_off", time(21, 0, tzinfo=TZ),  None),  # каждый день 21:00
+        ("air_off",   time(22, 0, tzinfo=TZ),  None),  # каждый день 22:00
+        ("water",     time(12, 0, tzinfo=TZ),  (SUNDAY,)),             # вс 12:00
+        ("filter",    time(12, 0, tzinfo=TZ),  (WEDNESDAY, SUNDAY)),  # ср + вс 12:00
+    ]
 
-    # Каждый день — 14:30
-    job_queue.run_daily(
-        lambda context: send_task(context, "light_on"),
-        time=time(14, 30, tzinfo=TZ),
-        name="light_on",
-    )
-
-    # Каждый день — 21:00
-    job_queue.run_daily(
-        lambda context: send_task(context, "light_off"),
-        time=time(21, 0, tzinfo=TZ),
-        name="light_off",
-    )
-
-    # Каждый день — 22:00
-    job_queue.run_daily(
-        lambda context: send_task(context, "air_off"),
-        time=time(22, 0, tzinfo=TZ),
-        name="air_off",
-    )
-
-    # Воскресенье — 12:00
-    job_queue.run_daily(
-        lambda context: send_task(context, "water"),
-        time=time(12, 0, tzinfo=TZ),
-        days=(6,),
-        name="water",
-    )
-
-    # Среда + воскресенье — 12:00
-    job_queue.run_daily(
-        lambda context: send_task(context, "filter"),
-        time=time(12, 0, tzinfo=TZ),
-        days=(2, 6),
-        name="filter",
-    )
+    for task_id, run_time, days in schedule:
+        kwargs = {"days": days} if days else {}
+        job_queue.run_daily(
+            scheduled_task,
+            time=run_time,
+            data=task_id,
+            name=task_id,
+            **kwargs,
+        )
 
     # Каждый день — 22:30
     job_queue.run_daily(
@@ -607,12 +673,17 @@ def setup_schedule(app):
         name="daily_report",
     )
 
+    # Проверка просроченных задач раз в минуту
     job_queue.run_repeating(
         check_overdue_tasks,
-        interval=10,
+        interval=60,
         first=60,
-        name="overdue_checker"
+        name="overdue_checker",
     )
+
+
+async def error_handler(update, context):
+    logger.error("Ошибка при обработке апдейта", exc_info=context.error)
 
 # =========================
 # MAIN
@@ -646,17 +717,19 @@ def main():
         CommandHandler("test", test)
     )
 
-    app.add_handler(CommandHandler("overdue_test", overdue_test))
-
+    app.add_handler(
+        CommandHandler("overdue_test", overdue_test)
     )
 
     app.add_handler(
         CallbackQueryHandler(button_handler)
     )
 
+    app.add_error_handler(error_handler)
+
     setup_schedule(app)
 
-    print("🐟 Aquarium Helper started")
+    logger.info("🐟 Aquarium Helper started")
 
     app.run_polling()
 
