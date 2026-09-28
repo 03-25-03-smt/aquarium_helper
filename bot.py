@@ -122,6 +122,27 @@ TASKS = {
     "filter": "🧽 Почистить губку фильтра",
 }
 
+# Тестовые задачи хранятся отдельно от настоящих, чтобы не мешать
+# реальному учёту и не показываться в /today, /history и отчёте
+TEST_TASKS = {
+    "test": "🧪 Тестовая задача",
+    "overdue_test": "🧪 Тестовая просроченная задача",
+}
+
+ALL_TASKS = {**TASKS, **TEST_TASKS}
+
+OVERDUE_AFTER = timedelta(hours=1)
+
+
+def is_test_task(task_id):
+    return task_id in TEST_TASKS
+
+
+def exclude_test_sql():
+    """SQL-условие, которое убирает тестовые задачи из выборки."""
+    placeholders = ", ".join("?" for _ in TEST_TASKS)
+    return f"AND task_id NOT IN ({placeholders})", tuple(TEST_TASKS)
+
 
 # =========================
 # DATABASE HELPERS
@@ -138,18 +159,24 @@ def save_task(task_id):
 
     conn = get_db()
 
-    # Если задачу уже отправляли сегодня (например, повторный /test),
-    # запись не дублируется
+    if is_test_task(task_id):
+        # Тестовую задачу каждый раз создаём заново,
+        # чтобы /test можно было повторять сколько угодно
+        sql = "INSERT OR REPLACE"
+    else:
+        # Настоящая задача за день создаётся один раз
+        sql = "INSERT OR IGNORE"
+
     conn.execute(
-        """
-        INSERT OR IGNORE INTO tasks
+        f"""
+        {sql} INTO tasks
         (date, task_id, task_name, sent_at)
         VALUES (?, ?, ?, ?)
         """,
         (
             date,
             task_id,
-            TASKS[task_id],
+            ALL_TASKS[task_id],
             timestamp,
         ),
     )
@@ -204,23 +231,27 @@ def complete_task(
     return row
 
 def get_today_tasks():
+    """Задачи за сегодня без тестовых."""
     conn = get_db()
 
+    exclude, params = exclude_test_sql()
+
     rows = conn.execute(
-        """
+        f"""
         SELECT *
         FROM tasks
         WHERE date = ?
+        {exclude}
         ORDER BY sent_at
         """,
-        (today_key(),),
+        (today_key(), *params),
     ).fetchall()
 
     conn.close()
 
     return rows
 
-def get_overdue_tasks():
+def get_overdue_tasks(include_test=True):
     conn = get_db()
 
     rows = conn.execute(
@@ -229,6 +260,7 @@ def get_overdue_tasks():
         FROM tasks
         WHERE date = ?
         AND completed_at IS NULL
+        ORDER BY sent_at
         """,
         (today_key(),),
     ).fetchall()
@@ -239,9 +271,12 @@ def get_overdue_tasks():
     overdue = []
 
     for row in rows:
+        if not include_test and is_test_task(row["task_id"]):
+            continue
+
         sent_at = datetime.fromisoformat(row["sent_at"])
 
-        if now - sent_at >= timedelta(hours=1):
+        if now - sent_at >= OVERDUE_AFTER:
             overdue.append(row)
 
     return overdue
@@ -337,14 +372,17 @@ async def history(update, context):
     # Дата считается по времени Праги, а не по времени сервера (на Railway это UTC)
     week_ago = (datetime.now(TZ).date() - timedelta(days=6)).isoformat()
 
+    exclude, params = exclude_test_sql()
+
     rows = conn.execute(
-        """
+        f"""
         SELECT *
         FROM tasks
         WHERE date >= ?
+        {exclude}
         ORDER BY date DESC, sent_at DESC
         """,
-        (week_ago,),
+        (week_ago, *params),
     ).fetchall()
 
     conn.close()
@@ -396,6 +434,46 @@ async def history(update, context):
         "\n".join(lines),
         parse_mode="Markdown",
     )
+
+
+async def overdue(update, context):
+    """Показывает задачи, которые не выполнены дольше часа."""
+    # Владельцу показываем и тестовые задачи — чтобы проверять /overdue_test
+    include_test = update.effective_user.id == OWNER_ID
+
+    rows = get_overdue_tasks(include_test=include_test)
+
+    if not rows:
+        await update.message.reply_text(
+            "👍 Просроченных задач нет."
+        )
+        return
+
+    now = datetime.now(TZ)
+
+    lines = [
+        "⚠️ *Просроченные задачи*",
+        "",
+    ]
+
+    for row in rows:
+        sent_at = datetime.fromisoformat(row["sent_at"])
+        minutes = int((now - sent_at).total_seconds() // 60)
+        hours, minutes = divmod(minutes, 60)
+
+        lines.append(
+            f"⏳ {row['task_name']}\n"
+            f"   Запланировано: {sent_at.strftime('%H:%M')} "
+            f"(прошло {hours} ч {minutes} мин)"
+        )
+        lines.append("")
+
+    lines.append(f"Всего: {len(rows)}")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+    )
 # =========================
 # SEND TASK
 # =========================
@@ -404,7 +482,9 @@ async def send_task(
     context: ContextTypes.DEFAULT_TYPE,
     task_id: str,
 ):
-    task_name = TASKS[task_id]
+    """Отправляет задачу всем из USERS.
+    Возвращает список ID, кому сообщение реально дошло."""
+    task_name = ALL_TASKS[task_id]
 
     date = save_task(task_id)
 
@@ -425,14 +505,21 @@ async def send_task(
         "Когда выполнишь — нажми кнопку ниже."
     )
 
+    delivered = []
+
     for user_id in USERS:
-        await safe_send(
+        ok = await safe_send(
             context,
             user_id,
             text=message,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
+        if ok:
+            delivered.append(user_id)
+
+    return delivered
 
 
 async def scheduled_task(context: ContextTypes.DEFAULT_TYPE):
@@ -463,7 +550,7 @@ async def button_handler(
         # Старый формат кнопок без даты: done:<task_id>
         date, task_id = today_key(), parts[1]
 
-    if task_id not in TASKS:
+    if task_id not in ALL_TASKS:
         return
 
     user = query.from_user
@@ -483,7 +570,7 @@ async def button_handler(
         date,
     )
 
-    task_name = TASKS[task_id]
+    task_name = ALL_TASKS[task_id]
 
     if row is None or row["completed_at"] is None:
         await query.edit_message_text(
@@ -546,7 +633,22 @@ async def test(
     if update.effective_user.id != OWNER_ID:
         return
 
-    await send_task(context, "feed")
+    # Отдельная тестовая задача: не трогает настоящую «Покормить рыбок»
+    delivered = await send_task(context, "test")
+
+    if delivered:
+        names = ", ".join(
+            "Брат" if uid == BROTHER_ID else str(uid)
+            for uid in delivered
+        )
+        await update.message.reply_text(
+            f"🧪 Тестовая задача отправлена: {names}"
+        )
+    else:
+        await update.message.reply_text(
+            "⚠️ Тестовая задача никому не дошла.\n"
+            "Проверь, что брат нажал /start у бота."
+        )
 
 
 async def overdue_test(update, context):
@@ -564,7 +666,7 @@ async def overdue_test(update, context):
     """, (
         today_key(),
         "overdue_test",
-        "🧪 Тестовая просроченная задача",
+        TEST_TASKS["overdue_test"],
         test_time.isoformat(),
     ))
 
@@ -573,7 +675,9 @@ async def overdue_test(update, context):
 
     await update.message.reply_text(
         "🧪 Тестовая просроченная задача создана.\n"
-        "Она считается отправленной 2 часа назад."
+        "Она считается отправленной 2 часа назад.\n\n"
+        "Уведомление придёт в течение минуты.\n"
+        "Проверить список можно командой /overdue."
     )
 
 
@@ -711,6 +815,10 @@ def main():
 
     app.add_handler(
         CommandHandler("history", history)
+    )
+
+    app.add_handler(
+        CommandHandler("overdue", overdue)
     )
 
     app.add_handler(
