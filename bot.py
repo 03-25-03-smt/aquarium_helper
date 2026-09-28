@@ -35,7 +35,7 @@ TZ = ZoneInfo("Europe/Prague")
 # DATABASE
 # =========================
 
-DB_FILE = "aquarium.db"
+DB_FILE = "/app/data/aquarium.db"
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
