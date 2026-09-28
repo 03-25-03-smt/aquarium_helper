@@ -21,7 +21,6 @@ OWNER_ID = 674005288
 
 USERS = [
     BROTHER_ID,
-    OWNER_ID,
 ]
 
 # =========================
