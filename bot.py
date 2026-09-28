@@ -325,7 +325,6 @@ async def button_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     query = update.callback_query
-
     await query.answer()
 
     data = query.data
@@ -336,7 +335,6 @@ async def button_handler(
     task_id = data.split(":", 1)[1]
 
     user = query.from_user
-
     user_id = user.id
 
     if user_id == BROTHER_ID:
@@ -361,7 +359,6 @@ async def button_handler(
         f"🕐 Время: {datetime.now(TZ).strftime('%H:%M')}",
         parse_mode="Markdown",
     )
-
 
 # =========================
 # START
@@ -555,6 +552,11 @@ def main():
     app.add_handler(
         CommandHandler("test", test)
     )
+
+    app.add_handler(
+        CallbackQueryHandler(button_handler)
+    )
+
     setup_schedule(app)
 
     print("🐟 Aquarium Helper started")
