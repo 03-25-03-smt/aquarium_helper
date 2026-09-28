@@ -19,6 +19,10 @@ from telegram.ext import (
 BROTHER_ID = 5546793025
 OWNER_ID = 674005288
 
+USERS = [
+    BROTHER_ID,
+    OWNER_ID,
+]
 
 # =========================
 # TIMEZONE
@@ -178,11 +182,13 @@ async def send_task(
         "Когда выполнишь — нажми кнопку ниже."
     )
 
+    for user_id in USERS:
     await context.bot.send_message(
-        chat_id=BROTHER_ID,
+        chat_id=user_id,
         text=message,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
+    )
     )
 
 
