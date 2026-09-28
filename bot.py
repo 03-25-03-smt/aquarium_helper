@@ -359,11 +359,10 @@ async def daily_report(
 # SCHEDULE
 # =========================
 
-def setup_schedule(app: Application):
-
+def setup_schedule(app):
     job_queue = app.job_queue
 
-    # 07:00
+    # Каждый день — 07:00
     job_queue.run_daily(
         lambda context: send_task(context, "feed"),
         time=time(7, 0, tzinfo=TZ),
@@ -376,28 +375,28 @@ def setup_schedule(app: Application):
         name="air_on",
     )
 
-    # 14:30
+    # Каждый день — 14:30
     job_queue.run_daily(
         lambda context: send_task(context, "light_on"),
         time=time(14, 30, tzinfo=TZ),
         name="light_on",
     )
 
-    # 21:00
+    # Каждый день — 21:00
     job_queue.run_daily(
         lambda context: send_task(context, "light_off"),
         time=time(21, 0, tzinfo=TZ),
         name="light_off",
     )
 
-    # 22:00
+    # Каждый день — 22:00
     job_queue.run_daily(
         lambda context: send_task(context, "air_off"),
         time=time(22, 0, tzinfo=TZ),
         name="air_off",
     )
 
-    # Sunday 12:00
+    # Воскресенье — 12:00
     job_queue.run_daily(
         lambda context: send_task(context, "water"),
         time=time(12, 0, tzinfo=TZ),
@@ -405,7 +404,7 @@ def setup_schedule(app: Application):
         name="water",
     )
 
-    # Wednesday + Sunday 12:00
+    # Среда + воскресенье — 12:00
     job_queue.run_daily(
         lambda context: send_task(context, "filter"),
         time=time(12, 0, tzinfo=TZ),
@@ -413,7 +412,7 @@ def setup_schedule(app: Application):
         name="filter",
     )
 
-    # 22:30 report
+    # Каждый день — 22:30
     job_queue.run_daily(
         daily_report,
         time=time(22, 30, tzinfo=TZ),
