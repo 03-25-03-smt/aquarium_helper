@@ -130,7 +130,9 @@ DEFAULT_SCHEDULE = [
     ("light_off", (21, 0),  ALL_DAYS),
     ("air_off",   (22, 0),  ALL_DAYS),
     ("water",     (12, 0),  (SUNDAY,)),
-    ("filter",    (12, 0),  (WEDNESDAY, SUNDAY)),
+    # Одна задача может встречаться несколько раз с разным временем в разные дни
+    ("filter",    (19, 0),  (WEDNESDAY,)),
+    ("filter",    (12, 0),  (SUNDAY,)),
 ]
 
 WEEKDAYS_RU = [
